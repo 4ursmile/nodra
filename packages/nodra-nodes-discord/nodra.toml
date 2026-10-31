@@ -1,0 +1,11 @@
+[package]
+name = "nodra-nodes-discord"
+version = "1.0.1"
+type = "node"
+description = "Works nodes for a full Discord bot: start a work from any channel message (gateway connection, no tunnel) and send or reply as the bot. discord.py is installed into the package's own environment."
+tags = ["nodra", "ui", "works", "nodes", "discord", "bot"]
+readme = "README.md"
+license = "MIT"
+
+[python]
+requires = ["discord.py>=2.3"]         # installed into ~/.nodra/venvs/nodra-nodes-discord; nodra-chat runs these nodes with that python

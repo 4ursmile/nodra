@@ -1,0 +1,12 @@
+[package]
+name = "nodra-slides"
+version = "1.0.1"
+type = "skill"
+description = "Teaches Claude to build slide decks and documents as HTML that Nodra presents as a slideshow and exports to PowerPoint, Word and PDF, in a saved theme."
+tags = ["slides", "presentation", "docs", "pptx", "docx"]
+readme = "README.md"
+license = "MIT"
+
+[[skills]]
+name = "nodra-slides"
+path = "skills/nodra-slides"

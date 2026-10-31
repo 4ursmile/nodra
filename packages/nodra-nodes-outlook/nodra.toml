@@ -1,0 +1,14 @@
+[package]
+name = "nodra-nodes-outlook"
+version = "1.0.1"
+type = "node"
+description = "Works node that sends mail (or saves a draft, or opens the window) through the Outlook desktop app on Windows. pywin32 is installed into the package's own environment."
+tags = ["nodra", "ui", "works", "nodes", "outlook", "mail", "windows"]
+readme = "README.md"
+license = "MIT"
+
+[requires]
+os = ["windows"]                       # COM automation of classic Outlook exists on Windows only
+
+[python]
+requires = ["pywin32"]                 # installed into ~/.nodra/venvs/nodra-nodes-outlook; nodra-chat runs this node with that python

@@ -1,0 +1,12 @@
+[package]
+name = "nodra-knowledge"
+version = "2.0.0"
+type = "skill"
+description = "Teaches Claude Code and Codex to use Nodra knowledge notes: read and write your local notes in ~/.nodra/knowledge."
+tags = ["nodra", "knowledge", "notes"]
+readme = "README.md"
+license = "MIT"
+
+[[skills]]
+name = "nodra-knowledge"
+path = "skills/nodra-knowledge"

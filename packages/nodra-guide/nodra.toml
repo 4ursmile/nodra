@@ -1,0 +1,12 @@
+[package]
+name = "nodra-guide"
+version = "3.0.0"
+type = "skill"
+description = "Teaches Claude Code, Codex and OpenCode to use Nodra (CLI, sources, packaging, Works nodes, MCP servers, bots) from a bundled offline guide."
+tags = ["nodra", "docs", "guide"]
+readme = "README.md"
+license = "MIT"
+
+[[skills]]
+name = "nodra-guide"
+path = "skills/nodra-guide"

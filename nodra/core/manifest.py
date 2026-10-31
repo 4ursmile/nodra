@@ -1,0 +1,224 @@
+"""Parse + validate nodra.toml."""
+from . import naming, version
+
+import os
+import json
+import re
+
+TYPES = ("skill", "agent", "mcp", "tool", "setup", "bot", "service", "workflow", "node")
+RUNNABLE = ("bot", "service")     # types `nodra run` starts; their [bot] / [service] table has the same shape
+RESTARTS = ("no", "on-failure", "always")
+OSES = ("macos", "linux", "windows")
+SCRIPT_EXT = (".sh", ".ps1", ".cmd", ".bat", ".py")
+
+
+def lint(m: dict, root: str):
+    """File-level checks against the project folder (normalize() only sees the TOML). -> (errors, warnings)."""
+    errs, warns = [], []
+    base = os.path.realpath(root)
+
+    def inside(rel):
+        full = os.path.realpath(os.path.join(base, rel))
+        return full if full == base or full.startswith(base + os.sep) else None
+
+    def need(rel, what):
+        full = inside(rel)
+        if full is None:
+            errs.append("%s %r points outside the project" % (what, rel))
+        elif not os.path.exists(full):
+            errs.append("%s %r does not exist" % (what, rel))
+        return full
+
+    for kind, label in (("skills", "skill"), ("agents", "agent"), ("commands", "command")):
+        for x in m[kind]:
+            full = need(x.get("path", ""), "%s path" % label)
+            if full and label == "skill" and os.path.isdir(full) and not os.path.isfile(os.path.join(full, "SKILL.md")):
+                errs.append("skill %r has no SKILL.md in %s" % (x["name"], x["path"]))
+    for cmd, rel in m["bin"].items():
+        need(rel, "[bin] %s" % cmd)
+    for key, entry in m["scripts"].items():
+        e = str(entry).strip()
+        if e.lower().endswith(SCRIPT_EXT) and " " not in e:
+            need(e, "[scripts] %s" % key)
+    pkg = m["package"]
+    typ = pkg["type"]
+    # agent/mcp/tool packages that run something need a way to install it on every OS they claim to support
+    self_installing = bool(m["bin"] or m["mcp_servers"] or m["agents"])
+    if typ in ("agent", "mcp", "tool") and not self_installing:
+        missing = [o for o in (m["requires"]["os"] or OSES) if ("install_" + o) not in m["scripts"]]
+        if missing:
+            warns.append("type=%s but no install script for: %s" % (typ, ", ".join(missing)))
+    if typ == "workflow":
+        wd = inside("works")
+        files = sorted(f for f in (os.listdir(wd) if wd and os.path.isdir(wd) else []) if f.endswith(".work.json"))
+        if not files:
+            errs.append('type="workflow" needs at least one works/NAME.work.json (export it from nodra-chat: Works > Share)')
+        for f in files:
+            try:
+                with open(os.path.join(wd, f), encoding="utf-8") as fh:
+                    w = json.load(fh)
+                if not isinstance(w, dict) or not isinstance(w.get("nodes"), list) or not w["nodes"]:
+                    errs.append("works/%s has no nodes" % f)
+            except (OSError, ValueError) as e:
+                errs.append("works/%s is not valid JSON: %s" % (f, e))
+    if typ == "node":
+        nd = inside("nodes")
+        files = sorted(f for f in (os.listdir(nd) if nd and os.path.isdir(nd) else []) if f.endswith(".node.json"))
+        if not files:
+            errs.append('type="node" needs at least one nodes/NAME.node.json (see ui-nodes)')
+        for f in files:
+            try:
+                with open(os.path.join(nd, f), encoding="utf-8") as fh:
+                    n = json.load(fh)
+                if not isinstance(n, dict) or not n.get("id") or n.get("kind") not in ("trigger", "action"):
+                    errs.append('nodes/%s needs "id" and "kind" (trigger|action)' % f)
+                elif not isinstance(n.get("run"), list) or not n["run"]:
+                    errs.append('nodes/%s needs "run" as a list' % f)
+                else:
+                    for a in n["run"]:
+                        if isinstance(a, str) and a.startswith("nodes/") and not os.path.isfile(os.path.join(base, a)):
+                            warns.append("nodes/%s runs %s which does not exist" % (f, a))
+            except (OSError, ValueError) as e:
+                errs.append("nodes/%s is not valid JSON: %s" % (f, e))
+    if typ in RUNNABLE:
+        run = m[typ]["run"]
+        if not run:
+            errs.append('type="%s" needs [%s] run = "path/to/start.py" (what `nodra run` starts)' % (typ, typ))
+        elif run.lower().endswith(SCRIPT_EXT) and " " not in run:
+            need(run, "[%s] run" % typ)
+        if m[typ]["onboard"]:
+            need(m[typ]["onboard"], "[%s] onboard" % typ)
+    if typ == "mcp" and not m["mcp_servers"]:
+        errs.append('type="mcp" needs at least one [[mcp_servers]] entry')
+    if (m.get("python") or {}).get("install") and not os.path.isfile(os.path.join(base, "pyproject.toml")):
+        errs.append("[python] install = true needs a pyproject.toml in the package folder")
+    if typ == "skill" and not m["skills"]:
+        warns.append('type="skill" but there is no [[skills]] entry, so nothing will be registered')
+    if typ == "agent" and not m["agents"]:
+        warns.append('type="agent" but there is no [[agents]] entry, so nothing will be registered')
+    if not pkg["description"].strip():
+        warns.append("package.description is empty; it is what people search and read first")
+    if not os.path.isfile(os.path.join(base, pkg["readme"])):
+        warns.append("README %r not found; the package page will have no Overview" % pkg["readme"])
+    return errs, warns
+
+try:
+    import tomllib as _toml  # py3.11+
+except ImportError:  # py3.9 / 3.10
+    from . import toml_lite as _toml
+
+
+def parse(text: str) -> dict:
+    return normalize(_toml.loads(text))
+
+
+def _authors(raw) -> list:
+    """authors = ["Ada <ada@x.org>", {name = "Bob", email = "b@x.org", url = "https://..."}] -> [{name, email?, url?}]."""
+    if isinstance(raw, (str, dict)):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return []                                    # display metadata must never stop a package from installing or syncing
+    out = []
+    for a in raw:
+        if not isinstance(a, (str, dict)):
+            continue
+        if isinstance(a, dict):
+            a = {k: str(a[k]).strip() for k in ("name", "email", "url") if a.get(k)}
+        else:
+            m = re.match(r"^\s*(.*?)\s*(?:<([^>]*)>)?\s*$", str(a))
+            a = {k: v for k, v in (("name", m.group(1)), ("email", (m.group(2) or "").strip())) if v}
+        if a.get("name") or a.get("email"):
+            out.append(a)
+    return out
+
+
+def runnable(m: dict) -> dict:
+    """The [bot] or [service] table of a package `nodra run` can start (the bot one for any other type)."""
+    typ = m["package"]["type"]
+    return (m.get(typ) if typ in RUNNABLE else None) or m["bot"]
+
+
+def _url_file(v) -> str:
+    """Relative path inside ~/.nodra, else "" (never raises, never leaves ~/.nodra)."""
+    v = str(v or "").strip().replace("\\", "/")
+    return v if v and not v.startswith("/") and ".." not in v.split("/") and len(v) < 120 else ""
+
+
+def _bot(b, restart="") -> dict:
+    """[bot] / [service] run = "bot.py", title, onboard, env = [{name, hint, required, secret}], restart, schedule (run defaults),
+    unique (true: `nodra run` allows only one run of the package at a time on a machine),
+    url_file (a file under ~/.nodra holding the address the service serves, e.g. "ui/url.txt": `nodra run` shows it and opens it in the browser).
+    Display fields never raise: a bad entry is dropped."""
+    if not isinstance(b, dict):
+        b = {}
+    env = []
+    for e in b.get("env", []) if isinstance(b.get("env"), list) else []:
+        if isinstance(e, str):
+            e = {"name": e}
+        if isinstance(e, dict) and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(e.get("name", ""))):
+            env.append({"name": str(e["name"]), "hint": str(e.get("hint", "")), "required": bool(e.get("required", True)),
+                        "secret": bool(e.get("secret", False)), "default": str(e.get("default", ""))})
+    r = str(b.get("restart", "")).strip()
+    return {"run": str(b.get("run", "")).strip(), "title": str(b.get("title", "")), "onboard": str(b.get("onboard", "")).strip(), "env": env,
+            "restart": r if r in RESTARTS else restart, "schedule": str(b.get("schedule", "")).strip(), "unique": b.get("unique") is True, "url_file": _url_file(b.get("url_file"))}
+
+
+def normalize(d: dict) -> dict:
+    p = d.get("package") or {}
+    if not p:
+        raise ValueError("[package] table missing")
+    name = naming.validate(str(p.get("name", "")))
+    ver = str(p.get("version", ""))
+    version.parse(ver)
+    typ = p.get("type", "tool")
+    if typ not in TYPES:
+        raise ValueError("package.type must be one of %s" % (TYPES,))
+    setup = d.get("setup") or {}
+    for st in setup.get("steps", []):
+        if st.get("kind") not in ("env", "json_merge", "file", "block", "command"):
+            raise ValueError("setup step has unknown kind: %r" % st.get("kind"))
+    scripts = d.get("scripts") or {}
+    for k in scripts:
+        m = re.match(r"^(install|uninstall)_(macos|linux|windows)$", k)
+        if not m:
+            raise ValueError("[scripts] key %r is not valid; use install_macos, install_linux, install_windows (and uninstall_*)" % k)
+    for kind in ("skills", "agents", "mcp_servers", "commands"):
+        names = [str(x.get("name", "")) for x in d.get(kind, [])]
+        if any(not n for n in names):
+            raise ValueError("every [[%s]] entry needs a name" % kind)
+        if len(set(names)) != len(names):
+            raise ValueError("duplicate name in [[%s]]" % kind)
+    for x in d.get("mcp_servers", []):
+        if not x.get("command"):
+            raise ValueError("[[mcp_servers]] %r needs a command" % x.get("name"))
+    req = d.get("requires") or {}
+    if req.get("os") and any(o not in OSES for o in req["os"]):
+        raise ValueError("requires.os values must be among %s" % (OSES,))
+    py = d.get("python") or {}
+    bot = d.get("bot") or {}
+    return {
+        "package": {
+            "name": name, "version": ver, "type": typ,
+            "description": str(p.get("description", "")),
+            "tags": [str(t).lower() for t in p.get("tags", [])],
+            "readme": p.get("readme", "README.md"),
+            "license": p.get("license", ""),
+            "authors": _authors(p.get("authors")),
+        },
+        "requires": {
+            "commands": req.get("commands", []),  # [{name, hint}] or [str]
+            "packages": req.get("packages", []),  # ["dep", "dep>=1"]
+            "os": req.get("os", []),
+        },
+        "python": {"requires": py.get("requires", []), "requirements_file": py.get("requirements_file", ""),
+                   "install": bool(py.get("install", False))},   # true: pip install the package folder itself (its pyproject.toml)
+        "skills": d.get("skills", []),           # [{name, path}]
+        "agents": d.get("agents", []),           # [{name, path}]
+        "commands": d.get("commands", []),       # [{name, path}] slash commands (a markdown file each)
+        "mcp_servers": d.get("mcp_servers", []), # [{name, command, args, env}]
+        "bin": d.get("bin", {}),                 # {cmd: relative/path}
+        "scripts": d.get("scripts", {}),         # {install_<os>: "...", uninstall_<os>: "..."}
+        "setup": setup,
+        "bot": _bot(bot),
+        "service": _bot(d.get("service") or {}, restart="always"),   # a service is meant to stay up
+    }

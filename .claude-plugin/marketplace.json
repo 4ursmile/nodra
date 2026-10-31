@@ -1,0 +1,32 @@
+{
+  "name": "nodra",
+  "owner": {
+    "name": "Nodra community"
+  },
+  "plugins": [
+    {
+      "name": "nodra-guide",
+      "source": "./packages/nodra-guide",
+      "description": "Teaches Claude Code, Codex and OpenCode to use Nodra (CLI, sources, packaging, Works nodes, MCP servers, bots) from a bundled offline guide.",
+      "version": "3.0.0"
+    },
+    {
+      "name": "nodra-knowledge",
+      "source": "./packages/nodra-knowledge",
+      "description": "Teaches Claude Code and Codex to use Nodra knowledge notes: read and write your local notes in ~/.nodra/knowledge.",
+      "version": "2.0.0"
+    },
+    {
+      "name": "nodra-package",
+      "source": "./packages/nodra-package",
+      "description": "Teaches Claude Code and Codex to turn a new or existing project into a valid Nodra package; then validate, pack and share it through a package source.",
+      "version": "3.0.0"
+    },
+    {
+      "name": "nodra-slides",
+      "source": "./packages/nodra-slides",
+      "description": "Teaches Claude to build slide decks and documents as HTML that Nodra presents as a slideshow and exports to PowerPoint, Word and PDF, in a saved theme.",
+      "version": "1.0.1"
+    }
+  ]
+}

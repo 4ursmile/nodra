@@ -1,0 +1,12 @@
+[package]
+name = "nodra-package"
+version = "3.0.0"
+type = "skill"
+description = "Teaches Claude Code and Codex to turn a new or existing project into a valid Nodra package; then validate, pack and share it through a package source."
+tags = ["nodra", "packaging", "validate"]
+readme = "README.md"
+license = "MIT"
+
+[[skills]]
+name = "nodra-package"
+path = "skills/nodra-package"

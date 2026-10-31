@@ -1,0 +1,340 @@
+"""Starter projects for `nodra dev init --type ...`. Each is a complete, publishable project, not a stub:
+files = {relative path: content}. Placeholders: {name}, {title}, {Name}. Executable files are listed in EXEC."""
+import json
+import re
+
+README = """# {title}
+
+{description}
+
+## Install
+
+```
+nodra install {name}
+```
+
+## What it does
+
+Describe what {title} does and when to use it. This page is shown on the package's Overview tab.
+
+## Usage
+
+Show one or two concrete examples.
+
+## Uninstall
+
+```
+nodra uninstall {name}
+```
+"""
+
+SKILL_MD = """---
+name: {name}
+description: Use when the user asks to <describe the trigger in one sentence>. <What it does.>
+---
+
+# {title}
+
+## When to use
+
+- <situation 1>
+- <situation 2>
+
+## Steps
+
+1. <first step>
+2. <second step>
+3. <verify the result>
+
+## Notes
+
+- Keep this file under ~500 lines; put long reference material in separate files next to it.
+"""
+
+AGENT_MD = """---
+name: {name}
+description: <When should the assistant delegate to this agent? One sentence.>
+tools: Read, Grep, Glob
+---
+
+You are {title}. <State the role and goal.>
+
+## How you work
+
+1. <step>
+2. <step>
+
+## Output
+
+Return <what the caller should get back>. Be concise.
+"""
+
+MCP_SERVER_PY = '''#!/usr/bin/env python3
+"""{title} - a minimal MCP server over stdio (JSON-RPC 2.0). Standard library only.
+Replace the tool in TOOLS with your own. Test it:  echo '{{"jsonrpc":"2.0","id":1,"method":"tools/list"}}' | python3 server/server.py
+"""
+import json
+import sys
+
+TOOLS = {{
+    "echo": {{
+        "description": "Return the text you send.",
+        "inputSchema": {{"type": "object", "properties": {{"text": {{"type": "string"}}}}, "required": ["text"]}},
+        "run": lambda args: str(args.get("text", "")),
+    }},
+}}
+
+
+def respond(id_, result=None, error=None):
+    msg = {{"jsonrpc": "2.0", "id": id_}}
+    msg.update({{"error": error}} if error else {{"result": result}})
+    sys.stdout.write(json.dumps(msg) + "\\n")
+    sys.stdout.flush()
+
+
+def handle(req):
+    m, id_ = req.get("method"), req.get("id")
+    if m == "initialize":
+        return respond(id_, {{"protocolVersion": "2024-11-05", "capabilities": {{"tools": {{}}}}, "serverInfo": {{"name": "{name}", "version": "0.1.0"}}}})
+    if m == "tools/list":
+        return respond(id_, {{"tools": [{{"name": k, "description": v["description"], "inputSchema": v["inputSchema"]}} for k, v in TOOLS.items()]}})
+    if m == "tools/call":
+        p = req.get("params", {{}})
+        tool = TOOLS.get(p.get("name"))
+        if not tool:
+            return respond(id_, error={{"code": -32602, "message": "unknown tool"}})
+        try:
+            return respond(id_, {{"content": [{{"type": "text", "text": tool["run"](p.get("arguments", {{}}))}}]}})
+        except Exception as e:  # report tool failures to the model, don't crash the server
+            return respond(id_, {{"content": [{{"type": "text", "text": "error: %s" % e}}], "isError": True}})
+    if id_ is not None:  # notifications (no id) get no reply
+        respond(id_, error={{"code": -32601, "message": "method not found"}})
+
+
+def main():
+    for line in sys.stdin:
+        line = line.strip()
+        if line:
+            try:
+                handle(json.loads(line))
+            except json.JSONDecodeError:
+                respond(None, error={{"code": -32700, "message": "parse error"}})
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+TOOL_PY = '''#!/usr/bin/env python3
+"""{title} - a command line tool. Standard library only."""
+import argparse
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="{name}", description="{description}")
+    ap.add_argument("name", nargs="?", default="world")
+    a = ap.parse_args()
+    print("hello, %s" % a.name)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+INSTALL_SH = """#!/bin/sh
+# Runs after the package files are placed in $NODRA_PACKAGE_DIR. Keep it idempotent (safe to run twice).
+# nodra asks the user before running this. Do only what the package needs; never use sudo.
+set -eu
+echo "{name}: installing on $(uname -s)"
+# example: check a prerequisite and say how to get it
+# command -v git >/dev/null 2>&1 || {{ echo "git is required: https://git-scm.com" >&2; exit 1; }}
+"""
+
+UNINSTALL_SH = """#!/bin/sh
+# Undo whatever install.sh did. Files nodra placed are removed by nodra itself.
+set -eu
+echo "{name}: uninstalling"
+"""
+
+INSTALL_PS1 = """# Runs after the package files are placed in $env:NODRA_PACKAGE_DIR. Keep it idempotent. Never require admin rights.
+$ErrorActionPreference = 'Stop'
+Write-Host "{name}: installing on Windows"
+# example: check a prerequisite
+# if (-not (Get-Command git -ErrorAction SilentlyContinue)) {{ Write-Error 'git is required: https://git-scm.com'; exit 1 }}
+"""
+
+UNINSTALL_PS1 = """$ErrorActionPreference = 'Stop'
+Write-Host "{name}: uninstalling"
+"""
+
+GITIGNORE = "dist/\n__pycache__/\n*.pyc\n.DS_Store\n.venv/\nnode_modules/\n"
+EXEC = {"scripts/install.sh", "scripts/uninstall.sh", "server/server.py", "bin/{name}.py"}
+
+SCRIPT_TOML = """
+[scripts]
+install_macos = "scripts/install.sh"
+install_linux = "scripts/install.sh"
+install_windows = "scripts/install.ps1"
+uninstall_macos = "scripts/uninstall.sh"
+uninstall_linux = "scripts/uninstall.sh"
+uninstall_windows = "scripts/uninstall.ps1"
+"""
+
+HEAD = """# nodra.toml - the manifest. Docs: docs/manifest.md
+[package]
+name = "{name}"
+version = "0.1.0"                 # immutable once published; bump it for every release (nodra dev publish --bump patch, or edit it by hand)
+type = "{type}"                   # skill | agent | mcp | tool | setup | bot | service | workflow | node
+description = "{description}"
+tags = []                         # lowercase words people search for
+readme = "README.md"
+license = "MIT"
+authors = []                      # e.g. ["Ada Lovelace <ada@example.com>"]; shown on the package page
+
+[requires]
+commands = []                     # e.g. [{{name = "git", hint = "brew install git"}}]
+packages = []                     # other packages this needs, e.g. ["base-tools>=1.0"]
+os = []                           # empty = all. Or any of: "macos", "linux", "windows"
+"""
+
+TEMPLATES = {
+    "skill": {
+        "manifest": HEAD + '\n[[skills]]\nname = "{name}"\npath = "skills/{name}"\n',
+        "files": {"skills/{name}/SKILL.md": SKILL_MD, "README.md": README, ".gitignore": GITIGNORE},
+    },
+    "agent": {
+        "manifest": HEAD + '\n[[agents]]\nname = "{name}"\npath = "agents/{name}.md"\n',
+        "files": {"agents/{name}.md": AGENT_MD, "README.md": README, ".gitignore": GITIGNORE},
+    },
+    "mcp": {
+        "manifest": HEAD.replace('os = []', 'os = []') + '\n[[mcp_servers]]\nname = "{name}"\ncommand = "python3"\nargs = ["${{PKG}}/server/server.py"]\nenv = {{}}\n'
+                    + SCRIPT_TOML,
+        "files": {"server/server.py": MCP_SERVER_PY, "scripts/install.sh": INSTALL_SH, "scripts/uninstall.sh": UNINSTALL_SH,
+                  "scripts/install.ps1": INSTALL_PS1, "scripts/uninstall.ps1": UNINSTALL_PS1, "README.md": README, ".gitignore": GITIGNORE},
+    },
+    "tool": {
+        "manifest": HEAD + '\n[bin]\n{name} = "bin/{name}.py"\n' + SCRIPT_TOML,
+        "files": {"bin/{name}.py": TOOL_PY, "scripts/install.sh": INSTALL_SH, "scripts/uninstall.sh": UNINSTALL_SH,
+                  "scripts/install.ps1": INSTALL_PS1, "scripts/uninstall.ps1": UNINSTALL_PS1, "README.md": README, ".gitignore": GITIGNORE},
+    },
+    "setup": {
+        "manifest": HEAD + '''
+# A setup profile changes the user's machine/config. Each step is shown to the user and applied only if they approve it,
+# and every step is undone by `nodra uninstall`. Kinds: env, json_merge, file, block, command.
+[[setup.steps]]
+kind = "env"
+name = "{Name}_HOME"
+value = "${{HOME}}/.{name}"
+
+[[setup.steps]]
+kind = "file"
+path = "${{HOME}}/.{name}/config.txt"
+content = "home=${{HOME}}\\n"
+''',
+        "files": {"README.md": README, ".gitignore": GITIGNORE},
+    },
+}
+
+
+BOT_RUN = """#!/usr/bin/env python3
+# Started by `nodra run {name}`. Settings come from the environment (the .env file printed at install); see docs/bots.md.
+import os
+import sys
+
+print("{name} is running. Soul and notes: " + os.environ.get("NODRA_KNOWLEDGE_DIR", ""))
+print("Args:", sys.argv[1:])
+"""
+
+BOT_IGNORE = GITIGNORE + ".env\n"
+
+TEMPLATES["bot"] = {
+    "manifest": HEAD + '\n[bot]\nrun = "bot/run.py"\ntitle = "{title}"\n\n[[bot.env]]\nname = "API_KEY"\nhint = "where to get it"\nsecret = true\n',
+    "files": {"bot/run.py": BOT_RUN, "README.md": README, ".gitignore": BOT_IGNORE},
+}
+EXEC.add("bot/run.py")
+
+SERVICE_RUN = """#!/usr/bin/env python3
+# Started by `nodra run {name}` and kept up (restart = "always"). Settings come from the environment (the .env file printed at install).
+import os
+import time
+
+print("{name} service is up; home: " + os.environ.get("NODRA_SERVICE_HOME", ""), flush=True)
+while True:
+    time.sleep(60)
+    print("{name}: still alive", flush=True)
+"""
+
+TEMPLATES["service"] = {
+    "manifest": HEAD + '\n[service]\nrun = "service/run.py"\ntitle = "{title}"\nrestart = "always"         # no | on-failure | always\n# schedule = "5m"          # optional: run on a schedule instead (seconds, 30s/5m/2h/1d or cron)\n# unique = true            # optional: only one run of this service at a time (no second --name)\n\n[[service.env]]\nname = "PORT"\nhint = "port to listen on"\ndefault = "8080"\nrequired = false\n',
+    "files": {"service/run.py": SERVICE_RUN, "README.md": README, ".gitignore": BOT_IGNORE},
+}
+EXEC.add("service/run.py")
+
+
+WORKFLOW_JSON = """{{
+ "title": "{title}",
+ "enabled": false,
+ "keep": 40,
+ "nodes": [
+  {{"id": "a", "type": "start.manual", "x": 60, "y": 80, "label": "", "config": {{"inputs": "topic|Topic|text||*"}}}},
+  {{"id": "b", "type": "ai.claude", "x": 360, "y": 80, "label": "", "config": {{"prompt": "Write three bullet points about {{{{data.topic}}}}.", "mode": "edits"}}}},
+  {{"id": "c", "type": "flow.output", "x": 660, "y": 80, "label": "", "config": {{"template": "{{{{input}}}}"}}}}
+ ],
+ "edges": [{{"from": "a", "to": "b"}}, {{"from": "b", "to": "c"}}]
+}}
+"""
+
+TEMPLATES["workflow"] = {
+    "manifest": HEAD + '\n# A workflow is a Works graph for nodra-chat (no code). Node packages it needs go here:\n# [requires]\n# packages = ["nodra-nodes-teams"]\n',
+    "files": {"works/{name}.work.json": WORKFLOW_JSON, "README.md": README, ".gitignore": GITIGNORE},
+}
+
+
+NODE_JSON = """{{
+  "id": "{name}",
+  "title": "{title}",
+  "kind": "action",
+  "group": "{title}",
+  "description": "{description}",
+  "run": ["{{python}}", "nodes/{pyname}.py"],
+  "timeout": 30,
+  "inputs": [{{"name": "input", "type": "text", "desc": "the text of the node before", "required": false}}],
+  "outputs": [{{"name": "text", "type": "text", "desc": "the text, upper-cased", "example": "HELLO"}}],
+  "fields": [
+    {{"name": "text", "label": "Text", "type": "textarea", "default": "{{{{input}}}}", "help": "{{{{input}}}} is the text from the previous node."}},
+    {{"name": "token", "label": "Token", "type": "password", "help": "Stored encrypted; the program gets it on stdin."}}
+  ]
+}}
+"""
+
+NODE_PY = """#!/usr/bin/env python3
+\"\"\"Action node: ONE JSON document on stdin ({{config, input, inputs, run (id, dir, node_dir), workdir}}); print ONE JSON line: {{"ok": true, "output": "..."}} or {{"ok": false, "error": "..."}}.\"\"\"
+import json
+import sys
+
+req = json.load(sys.stdin)
+text = (req["config"].get("text") or "{{{{input}}}}").replace("{{{{input}}}}", req.get("input", ""))
+print(json.dumps({{"ok": True, "output": text.upper()}}))
+"""
+
+TEMPLATES["node"] = {
+    "manifest": HEAD + '\n# A node package adds nodes to the nodra-chat Works editor: nodes/NAME.node.json + the program it runs (docs: ui-nodes).\n',
+    "files": {"nodes/{name}.node.json": NODE_JSON, "nodes/{pyname}.py": NODE_PY, "README.md": README, ".gitignore": GITIGNORE},
+}
+
+
+def render(typ, name, description="", authors=()):
+    """-> (manifest_text, {path: content}, set_of_executable_paths) for a starter project."""
+    if typ not in TEMPLATES:
+        raise ValueError("unknown type %r; choose from %s" % (typ, ", ".join(sorted(TEMPLATES))))
+    title = name.replace("-", " ").replace("_", " ").title()
+    desc = description or "%s - describe what it does in one sentence" % title
+    sub = dict(name=name, title=title, Name=name.replace("-", "_").upper(), type=typ, description=desc.replace('"', "'"), pyname=name.replace("-", "_"))
+    t = TEMPLATES[typ]
+    files = {p.format(**sub): c.format(**sub) for p, c in t["files"].items()}
+    execs = {p.format(**sub) for p in EXEC} & set(files)
+    manifest = t["manifest"].format(**sub)
+    if authors:
+        line = "authors = [%s]" % ", ".join(json.dumps(str(a), ensure_ascii=False) for a in authors)
+        manifest = re.sub(r"^authors = \[\].*$", lambda _: line, manifest, count=1, flags=re.M)
+    return manifest, files, execs

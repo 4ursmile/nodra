@@ -1,0 +1,122 @@
+// Small UI primitives: toast, popover, segmented control with a sliding indicator, switch, modal.
+import { html, useState, useEffect, useRef, useLayoutEffect } from "./vendor/preact-htm.js";
+import { Ic } from "./icons.js";
+
+// ---------- Esc stack: only the top-most layer (modal, popover, zoom, drawer) reacts to Esc
+const layers = [];
+export const escPush = (fn) => { const o = { fn }; layers.push(o); return () => { const i = layers.indexOf(o); if (i >= 0) layers.splice(i, 1); }; };
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && layers.length && !e.defaultPrevented) layers[layers.length - 1].fn(e); });
+// setInterval that sleeps while the tab is hidden and fires once when it comes back; `ms` null = off. The callback is read fresh on every tick.
+export function useInterval(fn, ms) {
+  const f = useRef(); f.current = fn;
+  useEffect(() => {
+    if (ms == null) return;
+    const tick = () => { if (!document.hidden) f.current(); }, t = setInterval(tick, ms);
+    document.addEventListener("visibilitychange", tick);
+    return () => { clearInterval(t); document.removeEventListener("visibilitychange", tick); };
+  }, [ms]);
+}
+
+let toastSet = null;
+export const setToaster = (f) => { toastSet = f; };
+export const toast = (t) => { if (toastSet) { toastSet(t); clearTimeout(toast.t); toast.t = setTimeout(() => toastSet(""), 3500); } };
+export const guard = (fn) => async (...a) => { try { return await fn(...a); } catch (e) { toast(e.message); } };
+
+export function Seg({ items, value, onChange, small }) {
+  const ref = useRef(), [ind, setInd] = useState({ l: 0, w: 0 });
+  useLayoutEffect(() => { const b = ref.current && ref.current.querySelector('[data-on="1"]'); if (b) setInd({ l: b.offsetLeft, w: b.offsetWidth }); }, [value, items.length]);
+  return html`<div class=${"seg" + (small ? " sm" : "")} ref=${ref} role="tablist"><i class="ind" style=${`transform:translateX(${ind.l}px);width:${ind.w}px`}></i>
+    ${items.map((it) => html`<button role="tab" data-on=${it.id === value ? "1" : "0"} class=${it.id === value ? "on" : ""} onClick=${() => onChange(it.id)}>${it.icon && Ic(it.icon, 14)}<span>${it.label}</span></button>`)}</div>`;
+}
+
+export function Pop({ open, setOpen, button, children, up = true, align = "left", width }) {
+  const ref = useRef();
+  useEffect(() => {
+    if (!open) return;
+    const d = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const off = escPush(() => setOpen(false));
+    document.addEventListener("pointerdown", d);
+    return () => { document.removeEventListener("pointerdown", d); off(); };
+  }, [open]);
+  return html`<div class="pw" ref=${ref}>${button}${open && html`<div class=${"pop " + (up ? "up " : "down ") + align} style=${width ? `width:${width}px` : ""}>${children}</div>`}</div>`;
+}
+
+export const Switch = ({ on, onChange, label }) => html`<button class=${"sw" + (on ? " on" : "")} role="switch" aria-checked=${on} aria-label=${label} onClick=${() => onChange(!on)}><i></i></button>`;
+
+const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]):not([type=hidden]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+export function Modal({ children, close, wide }) {
+  const cr = useRef(), box = useRef(); cr.current = close;                 // `close` is read through a ref: the Esc handler lives for the whole life of the dialog
+  useEffect(() => {
+    const prev = document.activeElement, off = escPush(() => cr.current && cr.current());
+    const b = box.current; if (b && !b.contains(document.activeElement)) { const f = b.querySelector("input,select,textarea") || b.querySelector(FOCUSABLE); if (f) f.focus(); else { b.tabIndex = -1; b.focus(); } }
+    return () => { off(); if (prev && prev.focus && document.contains(prev)) try { prev.focus(); } catch (e) { /* gone */ } };
+  }, []);
+  const trap = (e) => {
+    if (e.key !== "Tab" || !box.current) return;
+    const l = [...box.current.querySelectorAll(FOCUSABLE)].filter((x) => x.offsetParent !== null);
+    if (!l.length) { e.preventDefault(); return; }
+    const a = document.activeElement;
+    if (e.shiftKey && (a === l[0] || !box.current.contains(a))) { e.preventDefault(); l[l.length - 1].focus(); } else if (!e.shiftKey && (a === l[l.length - 1] || !box.current.contains(a))) { e.preventDefault(); l[0].focus(); }
+  };
+  return html`<div class="modal" onPointerDown=${(e) => e.target === e.currentTarget && cr.current && cr.current()} onKeyDown=${trap}><div class=${"sheet" + (wide ? " wide" : "")} role="dialog" aria-modal="true" ref=${box}>${children}</div></div>`;
+}
+
+// ---------- small form dialogs (replace prompt()/confirm()): ask({title, text, fields, submit, danger}) -> values or null
+let asker = () => Promise.resolve(null);
+export const ask = (spec) => asker(spec);
+// Promise<boolean> replacement for window.confirm: confirmBox({title, text, ok, danger}). Cancel comes first in the tab order, so focus starts there and Esc cancels.
+export const confirmBox = async (o) => !!(await ask({ title: o.title || "Are you sure?", text: o.text, submit: o.ok || "OK", danger: !!o.danger, fields: [] }));
+export function AskHost() {
+  const [q, setQ] = useState(null);
+  useEffect(() => { asker = (spec) => new Promise((ok) => setQ({ spec, ok, n: Math.random() })); return () => { asker = () => Promise.resolve(null); }; }, []);
+  if (!q) return null;
+  const done = (v) => { q.ok(v); setQ(null); };
+  return html`<${AskForm} key=${q.n} spec=${q.spec} done=${done}/>`;
+}
+function AskForm({ spec, done }) {
+  const fields = spec.fields || [], [v, setV] = useState(() => Object.fromEntries(fields.map((f) => [f.name, f.value ?? ""]))), first = useRef();
+  useEffect(() => { first.current && first.current.focus(); first.current && first.current.select && first.current.select(); }, []);
+  const shown = fields.filter((f) => !f.when || f.when(v)), bad = shown.find((f) => f.required && !String(v[f.name] ?? "").trim());
+  const submit = (e) => { e.preventDefault(); if (!bad) done(v); };
+  return html`<${Modal} close=${() => done(null)}><form onSubmit=${submit}><h1>${spec.title}</h1>${spec.text && html`<p class="sub" style="white-space:pre-line">${spec.text}</p>`}
+    ${shown.map((f, i) => html`<div class="field"><label>${f.label}${f.required ? " *" : ""}</label>
+      ${f.type === "select" ? html`<select ref=${i === 0 ? first : null} value=${v[f.name]} onChange=${(e) => setV({ ...v, [f.name]: e.target.value })}>${f.options.map((o) => html`<option value=${o.value}>${o.label}</option>`)}</select>`
+      : html`<input ref=${i === 0 ? first : null} type="text" maxlength=${f.max || 120} placeholder=${f.placeholder || ""} value=${v[f.name]} onInput=${(e) => setV({ ...v, [f.name]: e.target.value })}/>`}
+      ${f.help && html`<span class="mute small">${f.help}</span>`}</div>`)}
+    <div class="row" style="margin-top:18px"><span class="grow"></span><button type="button" class="btn" onClick=${() => done(null)}>Cancel</button>
+      <button type="submit" class=${"btn " + (spec.danger ? "bad" : "acc")} disabled=${!!bad}>${spec.submit || "OK"}</button></div></form><//>`;
+}
+
+// Number box with our own stepper arrows (the browser's spin buttons ignore the theme). Same props as <input>; `style` goes on the wrapper.
+export function Num({ style, ...rest }) {
+  const el = useRef();
+  const bump = (dir) => { const i = el.current; if (!i) return; try { dir > 0 ? i.stepUp() : i.stepDown(); } catch (e) { return; } i.dispatchEvent(new Event("input", { bubbles: true })); i.dispatchEvent(new Event("change", { bubbles: true })); i.focus(); };
+  const arrow = (up) => html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d=${up ? "m6 15 6-6 6 6" : "m6 9 6 6 6-6"}/></svg>`;
+  return html`<span class="numw" style=${style}><input type="number" ref=${el} ...${rest}/>
+    <button type="button" class="nb up" tabindex="-1" aria-label="Increase" onMouseDown=${(e) => e.preventDefault()} onClick=${() => bump(1)}>${arrow(true)}</button>
+    <button type="button" class="nb dn" tabindex="-1" aria-label="Decrease" onMouseDown=${(e) => e.preventDefault()} onClick=${() => bump(-1)}>${arrow(false)}</button></span>`;
+}
+
+// ---------- downloads
+const MIME = { html: "text/html", svg: "image/svg+xml", csv: "text/csv", md: "text/markdown", json: "application/json", zip: "application/zip" };
+function trigger(name, blob) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+// Save text the page already holds (a block, a snapshot) as a file.
+export function saveText(name, text, type) {
+  trigger(name, new Blob([text], { type: type || MIME[(name.split(".").pop() || "").toLowerCase()] || "text/plain" }));
+  return name;
+}
+// Download from the server (GET, or POST with a body) and save it. The name comes from Content-Disposition. -> the file name.
+export async function saveFile(path, body) {
+  const post = body !== undefined, r = await fetch("/api/" + path, { method: post ? "POST" : "GET", headers: post ? { "Content-Type": "application/json", "X-Nodra-UI": "1" } : {}, body: post ? JSON.stringify(body) : undefined });
+  if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.error || r.statusText); }
+  const cd = r.headers.get("Content-Disposition") || "", m = /filename\*=UTF-8''([^;]+)/i.exec(cd) || /filename="([^"]+)"/i.exec(cd);
+  let name = "download"; try { name = m ? decodeURIComponent(m[1]) : name; } catch (e) { name = m ? m[1] : name; }
+  trigger(name, await r.blob());
+  return name;
+}
+// File -> base64 (for uploads: the server reads JSON only)
+export const fileB64 = (f) => new Promise((ok, no) => { const rd = new FileReader(); rd.onload = () => ok(String(rd.result).split(",")[1] || ""); rd.onerror = () => no(new Error("Could not read the file.")); rd.readAsDataURL(f); });
