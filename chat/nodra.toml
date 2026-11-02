@@ -1,6 +1,6 @@
 [package]
 name = "nodra-chat"
-version = "1.0.0"
+version = "1.1.0"
 type = "service"
 description = "Local chat and control UI for Nodra: chat with Claude Code, manage packages and sources, services, MCP servers, knowledge and works. Runs on 127.0.0.1 only."
 tags = ["nodra", "ui", "chat", "local"]

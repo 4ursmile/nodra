@@ -1092,7 +1092,7 @@ def build_parser():
         ("Install", ["install", "uninstall", "update", "list"]),
         ("Manage", ["enable", "disable", "tree", "lock", "sync"]),
         ("Develop", ["dev"]),
-        ("Setup and maintenance", ["config", "vault", "run", "onboard", "knowledge", "soul", "usage", "welcome", "doctor", "version", "upgrade", "self-uninstall"]),
+        ("Setup and maintenance", ["config", "vault", "run", "work", "onboard", "knowledge", "soul", "usage", "welcome", "doctor", "version", "upgrade", "self-uninstall"]),
     ]
 
     def add(name, fn, help, description, epilog, *args):
@@ -1116,6 +1116,19 @@ def build_parser():
         "Examples:\n  nodra chat\n  nodra chat status\n  nodra chat restart\n  nodra chat stop",
         arg("action", nargs="?", default="start", choices=["start", "stop", "restart", "status", "open"], help="Default: start."),
         arg("--fg", "--foreground", dest="fg", action="store_true", help="start: run in this terminal (Ctrl-C stops it)."))
+    from . import workcmd
+    add("work", workcmd.cli, "Works (the chat's workflows) without the chat page: pull, set up credentials, run, serve in the background.",
+        "Runs the Works engine of this checkout's chat (chat/) from this terminal, on the same files as the chat (works, runs, credential sets, encrypted secrets). "
+        "A workflow package (type workflow) is pulled and added switched off; `setup` finds what it needs on this machine (credential sets, which are never shared, the working folder of a Claude node, secret fields, "
+        "the Python packages of its SQL / Spark / Python nodes) and asks for it or reads a JSON file; `run` runs it once with a live step log; "
+        "`serve --bg` fires the cron and package triggers of the enabled works in the background (the run nodra-works under `nodra run`). "
+        "Only one process fires triggers: the chat or the serve run, never both. Credential sets: `cred` (kinds, template, add/set from JSON or stdin, so secrets never sit on the command line). "
+        "Code nodes (Python, SQL, Spark, Trino) read the sets granted to them with the Python module nodra_vault, databases with nodra_data (`nodra work lib` prints their folder for your own scripts).\n\n"
+        "Subcommands: list | show W | pull PKG | import FILE | export W [-o DIR] | setup W [--creds FILE] [--folder NODE=PATH] [--env NAME] | set W NODE key=value [--folder P] [--credential SET] [--grant SET] [--revoke SET] [--secret FIELD] | "
+        "env check|install W [--env NAME] | enable W | disable W | run W [--input k=v] [--text T] | runs W | logs W [RUN] [--node N] | serve [--bg] [--hooks PORT] | cred list|kinds|template KIND|show S|add|set S|rm S | lib | rm W",
+        "Examples:\n  nodra work pull workflow-sales-etl\n  nodra work setup sales-etl --creds creds.json --env data\n  nodra work cred add --kind s3 --name lake --file buckets.json\n  nodra work set sales-etl claude --folder ~/projects/sales\n"
+        "  nodra work run sales-etl --input day=2026-10-31\n  nodra work enable sales-etl && nodra work serve --bg\n  nodra run logs nodra-works -f",
+        arg("rest", nargs=argparse.REMAINDER, metavar="SUBCOMMAND", help="list, show, pull, import, export, setup, set, env, enable, disable, run, runs, logs, serve, cred, lib, rm (nodra work --help)."))
     add("config", cmd_config, "Show or change CLI configuration.",
         "Print the current configuration (~/.nodra/config.json), or set a value. Sources are managed with 'nodra source'.",
         "Examples:\n  nodra config\n  nodra config set ca_bundle /path/ca.pem",

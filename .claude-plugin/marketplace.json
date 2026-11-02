@@ -8,7 +8,7 @@
       "name": "nodra-guide",
       "source": "./packages/nodra-guide",
       "description": "Teaches Claude Code, Codex and OpenCode to use Nodra (CLI, sources, packaging, Works nodes, MCP servers, bots) from a bundled offline guide.",
-      "version": "3.0.0"
+      "version": "3.1.0"
     },
     {
       "name": "nodra-knowledge",
@@ -20,7 +20,7 @@
       "name": "nodra-package",
       "source": "./packages/nodra-package",
       "description": "Teaches Claude Code and Codex to turn a new or existing project into a valid Nodra package; then validate, pack and share it through a package source.",
-      "version": "3.0.0"
+      "version": "3.1.0"
     },
     {
       "name": "nodra-slides",

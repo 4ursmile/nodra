@@ -32,7 +32,7 @@ The `nodra-guide` skill (if installed) has `offline.md`, a self-contained guide 
 
 **type = node (Works nodes).** `nodra dev init . --type node --name <name>` creates `nodes/<name>.node.json` plus `nodes/<name>.py` (stdin JSON in, one JSON line out). Secret fields use `"type": "password"`. Guide: `docs/nodes.md`.
 
-**type = workflow (a shared Works graph).** `nodra dev init . --type workflow --name <name>` creates `works/<name>.work.json`. No code, no install script. List node packages it needs under `[requires] packages`; never put secrets in the file.
+**type = workflow (a shared Works graph).** `nodra dev init . --type workflow --name <name>` creates `works/<name>.work.json`. No code, no install script. List node packages it needs under `[requires] packages`; never put secrets in the file. Files the prompts mention go in `works/<name>.files/` (referenced as `@file:{{work.files}}/<file>`); credential sets travel as kinds only (`credential_kind`, `vault_kinds`). Installers can run it without the chat: `nodra work pull <name>`, `nodra work setup <work>`, `nodra work run <work>` or `nodra work serve --bg`.
 
 **type = service (long-running program).** `nodra dev init . --type service --name <name>`. Same shape as a bot, table `[service]`: `run` (required), `title`, `onboard`, `[[service.env]]`, `restart` (no|on-failure|always, default always), optional `schedule` and `unique = true`. Settings go in `~/.nodra/services/<name>/.env`.
 

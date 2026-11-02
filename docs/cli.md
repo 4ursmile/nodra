@@ -74,6 +74,38 @@ nodra chat [start|stop|restart|status|open]
 
 Runs `<root>/chat` in place through the `nodra run` supervisor (service name `nodra-chat`) and prints or opens the URL from `~/.nodra/ui/url.txt`. `nodra chat` alone starts it if needed and opens the browser. Logs: `nodra run logs nodra-chat`.
 
+## Works without the chat (`nodra work`)
+
+`nodra work` runs the chat's Works engine (`chat/ui/server.py --works ...`, same Python and environment as `nodra chat`) from a terminal or a server, with no browser. It reads the same files as the chat (works, runs, credential sets, encrypted secrets), so a work designed in the chat runs here and the other way round.
+
+```sh
+nodra work list                                  # works: on/off, triggers, NEEDS SETUP count, who fires triggers
+nodra work show W                                # nodes, inputs, what it still needs
+nodra work pull PKG [--file F] [--again]         # nodra install PKG (a workflow package from your sources), then add its works (switched off)
+nodra work import FILE.work.json|FOLDER          # a shared work from a file or folder
+nodra work export W [-o DIR] [--no-notes]        # shareable copy: no secrets, no credential sets; mentioned files in <name>.files/
+nodra work setup W [--creds FILE|-] [--folder NODE=PATH] [--env NAME] [--install]   # credential sets, working folders, secret fields, then the Python packages of its code nodes
+nodra work set W NODE key=value ... [--folder PATH] [--credential SET|none] [--grant SET] [--revoke SET] [--secret FIELD]
+nodra work enable W | disable W [--force]
+nodra work run W [--input name=value|name=@file] [--text T] [--node TRIGGER] [-q] [--timeout S]   # one run here, live step log; exit 0 = done, 1 otherwise
+nodra work runs W [-n N] | logs W [RUN] [--node N]
+nodra work serve [--hooks PORT]                  # fire cron and package triggers of enabled works until stopped
+nodra work serve --bg                            # the same in the background: the run nodra-works (restart always); nodra run logs nodra-works -f
+nodra work cred list | kinds | template KIND | show SET | add --kind K --name N [--file F|-] | set SET [--name N] [--file F|-] | rm SET [-y]
+nodra work lib                                   # folder of nodra_vault + nodra_data for your own scripts (PYTHONPATH=$(nodra work lib))
+nodra work env list | check W [--node N] | install W [--node N] [--env NAME]   # Python packages of its SQL / Spark / Python nodes
+nodra work env check|install --type db.sql --set driver=oracle --env data      # the same for a node type, before any work exists
+nodra work rm W [-y]
+```
+
+- `W` is the work id, its title (case does not matter; a unique prefix is enough), its slug, or the package it came from. File and folder arguments are relative to where you type the command.
+- `--json` anywhere gives one JSON document; with `nodra --json work ...` it becomes the envelope's `data`.
+- Secrets are typed at a hidden prompt or read from a JSON file or stdin (`--file -`, `--creds -`), never from argv, and never printed (stored values show as `(stored)`).
+- `--creds FILE` takes `{"s3": {"buckets": [...]}, "trino": {"host": "...", "password": "..."}}` (kind -> fields; the set is named after the kind) or `{"sets": [{"kind": "s3", "name": "Lake", "fields": {...}}]}`. `nodra work cred template s3` prints a skeleton. Without a terminal and without `--creds`, `setup` picks the only set of a kind, otherwise it stops with the exact `nodra work cred add ...` to run.
+- Only ONE process on a machine fires cron and package triggers: the chat or `nodra work serve`, never both. The lease is `~/.nodra/ui/scheduler.json`, renewed every 15 s and taken over when it is older than 60 s or its process is dead. Manual runs, chat cards and `nodra work run` run in whatever process starts them.
+- `env`: what a node needs comes from its settings (SQL: sqlalchemy, the database driver, pandas / polars; Spark: pyspark), its code's imports and a shared node's `requires`. Installs use `python -m pip install` (`uv pip` when the env has no pip), which downloads from your package index; Java is never installed, its command is printed. `setup` installs packages after asking in a terminal; from a script only with `--install` or `--env NAME`.
+- Server flow: `nodra work pull workflow-sales-etl`, `nodra work setup sales-etl --creds creds.json --env data`, `nodra work run sales-etl --input day=2026-10-31` to try it, then `nodra work enable sales-etl && nodra work serve --bg`. Details in [nodes.md](nodes.md#run-works-without-the-chat-nodra-work).
+
 ## Bots, services and knowledge
 
 ```sh

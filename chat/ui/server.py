@@ -30,7 +30,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from nodraui import nodra as A, auth, bundle, claudeauth, limits, chat, chatshare, freechat, mcpclient, officeview, searchidx, selfupdate, sources, store, term, usagereport, works as W    # noqa: E402
+from nodraui import nodra as A, auth, bundle, claudeauth, limits, chat, chatshare, freechat, magic, mcpclient, nodeenv, officeview, searchidx, selfupdate, sources, store, term, usagereport, workpkg, works as W    # noqa: E402
 from nodraui.secretbox import Box, write_private                  # noqa: E402
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
@@ -1559,7 +1559,7 @@ def theme_delete(h, q, b):
 
 
 def works(h, q, b):
-    return {"works": store.works()}
+    return {"works": store.works(), "scheduler": W.scheduler()}         # who fires cron / package triggers: this UI, or `nodra work serve`
 
 
 def _warn_of(w):
@@ -1779,9 +1779,10 @@ def node_run(h, q, b):
     rec = W.new_chat_run(spec, sid if known else "", b.get("card"), b.get("config"), text, b.get("rid"))
     cfg_in = b.get("config") if isinstance(b.get("config"), dict) else {}
     if b.get("credential"):                                         # order: what the card typed > the credential set > defaults (same as a work's node)
-        cv = W.cred_values({"credential": str(b["credential"])}, spec, BOX)
-        if not cv:
+        c = W.credential(str(b["credential"]))
+        if not c or not spec.get("credential") or c["kind"] != spec["credential"]["kind"]:
             raise Err("that credential set is missing or is not for this node", 400)
+        cv = W.cred_values({"credential": c["id"]}, spec, BOX)               # a set of lists only (buckets) fills no field: the code reads it with nodra_vault
         cfg_in = dict(cv, **{k: v for k, v in cfg_in.items() if v not in (None, "")})
     try:
         W.clean_node_config(spec, cfg_in)
@@ -1790,7 +1791,7 @@ def node_run(h, q, b):
     b = dict(b, config=cfg_in)
     W.save_chat_run(rec)
     try:
-        r = W.run_single(spec, b.get("config"), text, wd, rid=rec["id"], rec=rec, box=BOX)
+        r = W.run_single(spec, b.get("config"), text, wd, rid=rec["id"], rec=rec, box=BOX, vault=W.vault_grant({"credential": str(b.get("credential") or "")}, BOX) if b.get("credential") else None)
     except W.Stopped:
         rec.update(status="stopped", ended=time.time())
         W.save_chat_run(rec)
@@ -1806,6 +1807,142 @@ def node_run(h, q, b):
     rec.update(status="done", ended=time.time(), result={"text": r["text"][:4000], "data": r.get("data")}, log=r.get("log", ""), cmd=r.get("cmd", ""), exit=r.get("exit"))
     W.save_chat_run(rec)
     return dict(r, run=rec["id"])
+
+
+# ---------- code nodes: Python environment, Magic ask, Run / Preview from the code editor
+
+def _spec_of(t):
+    spec = W.catalogue().get(str(t or ""))
+    if not spec:
+        raise Err("unknown node type", 400)
+    return spec
+
+
+def env_check(h, q, b):
+    """What a node's Python has and lacks for these settings: {check, envs}. `fresh` skips the few-second cache (after an install)."""
+    spec = _spec_of(b.get("type"))
+    if not nodeenv.has_env(spec):
+        raise Err("this node has no Python environment", 400)
+    cfg = b.get("config") if isinstance(b.get("config"), dict) else {}
+    req = [x for x in (b.get("requires") or []) if isinstance(x, str)] if isinstance(b.get("requires"), list) else None
+    return {"check": nodeenv.check(spec, cfg, bool(b.get("fresh")), req), "envs": nodeenv.envs()}
+
+
+def env_install(h, q, b):
+    """Install packages into a node's environment (a managed env is created first). -> {job}; the page polls works/env/job."""
+    pk = b.get("packages") if isinstance(b.get("packages"), list) else []
+    try:
+        job = nodeenv.install(str(b.get("env") or ""), [str(x) for x in pk], spark=str(b.get("type") or "") == "etl.spark")
+    except ValueError as e:
+        raise Err(str(e), 400)
+    return {"job": job}
+
+
+def env_job(h, q, b):
+    try:
+        after = max(0, int(q.get("after") or 0))
+    except ValueError:
+        after = 0
+    v = nodeenv.job_view(str(q.get("id") or ""), after)
+    if v is None:
+        raise Err("no such job", 404)
+    return {"job": v}
+
+
+def env_cancel(h, q, b):
+    return {"ok": nodeenv.cancel(str(b.get("id") or ""))}
+
+
+def env_list(h, q, b):
+    return {"envs": nodeenv.envs(), "dir": nodeenv.envs_dir(), "ui": sys.executable}
+
+
+def work_magic(h, q, b):
+    """Magic ask: {type, config, ask, field?, context?, model?} -> {config: proposed changes, note, dropped, engine}. Nothing is saved here."""
+    spec = _spec_of(b.get("type"))
+    ctx = b.get("context") if isinstance(b.get("context"), dict) else {}
+    try:
+        r = magic.magic(spec, b.get("config") if isinstance(b.get("config"), dict) else {}, need(b, "ask"), str(b.get("field") or "") or None, ctx,
+                        str(b.get("model") or ""), BOX, str(b.get("engine") or "auto"))
+    except ValueError as e:
+        raise Err(str(e), 400)
+    except RuntimeError as e:
+        raise Err("Magic ask: %s" % e, 502)
+    return r
+
+
+TRY = {}                                            # run id -> record of a Run from the code editor (memory only; logs in runs/try/)
+TRY_LOCK = threading.Lock()
+
+
+def work_try(h, q, b):
+    """Run ONE node of the editor as it is now (unsaved settings), in the background: {work, node {id,type,config,credential,preset,vault},
+    input, data, field, selection} -> {run}. Stored secrets, its credential set, saved node and granted sets apply as in a real run; SELECTION
+    (text of FIELD) runs instead of the whole field. Max rows is capped for a preview. Poll works/try/status, the log via works/log?work=try."""
+    nd = b.get("node") if isinstance(b.get("node"), dict) else {}
+    spec = _spec_of(nd.get("type"))
+    if not W.runnable(spec):
+        raise Err("only nodes that run a program (Python, SQL, Spark, HTTP ...) can run from here", 400)
+    wid = str(b.get("work") or "")
+    wid = wid if store.ID.match(wid) else ""
+    node = {"id": str(nd.get("id") or "n")[:20], "type": spec["type"], "config": dict(nd.get("config") or {})}
+    for k in ("credential", "preset"):
+        if isinstance(nd.get(k), str) and nd[k]:
+            node[k] = nd[k]
+    if isinstance(nd.get("vault"), list):
+        node["vault"] = [str(x) for x in nd["vault"]][:10]
+    field, sel = str(b.get("field") or ""), b.get("selection")
+    if isinstance(sel, str) and sel.strip():
+        if not any(f["name"] == field and f["type"] in ("code", "textarea", "text") for f in spec["fields"]):
+            raise Err("selection needs the field it comes from", 400)
+        node["config"][field] = sel
+    problem = W.credential_problem(node, spec)
+    if problem:
+        raise Err(problem, 400)
+    cfg = W.with_secrets(wid, node, spec, BOX)
+    if any(f["name"] == "max_rows" for f in spec["fields"]):
+        try:
+            cfg["max_rows"] = min(int(cfg.get("max_rows") or 200), 500)
+        except (TypeError, ValueError):
+            cfg["max_rows"] = 200
+    try:
+        W.clean_node_config(spec, cfg)
+    except ValueError as e:
+        raise Err(str(e), 400)
+    data = b.get("data") if isinstance(b.get("data"), dict) else None
+    text = str(b.get("input") or "")[:200000]
+    rid = "try-" + secrets.token_hex(6)
+    W.prune_try()
+    wd = W.run_dir(W.TRY_RUNS, rid)
+    rec = {"id": rid, "status": "running", "started": time.time(), "type": spec["type"], "node": node["id"]}
+    with TRY_LOCK:
+        for k in [k for k, r in TRY.items() if r.get("status") != "running" and time.time() - r.get("started", 0) > 3600]:
+            TRY.pop(k, None)
+        TRY[rid] = rec
+    vault = W.vault_grant(node, BOX) if (node.get("credential") or node.get("vault")) else None
+
+    def go():
+        try:
+            r = W.run_single(spec, cfg, text, wd, rid=rid, rec=rec, box=BOX, vault=vault, group=W.TRY_RUNS, data=data)
+            rec.update(status="done", result={"text": r["text"], "data": r.get("data")}, log=r.get("log", ""), exit=r.get("exit"))
+        except W.Stopped:
+            rec.update(status="stopped")
+        except Exception as e:
+            rec.update(status="failed", error=str(e)[:4000])
+        rec["ended"] = time.time()
+        try:
+            rec["files"] = [f for f in W.run_files(W.TRY_RUNS, rid, 50)]
+        except Exception:
+            pass
+    threading.Thread(target=go, daemon=True).start()
+    return {"run": rid, "dir": wd}
+
+
+def work_try_status(h, q, b):
+    rec = TRY.get(str(q.get("run") or ""))
+    if rec is None:
+        raise Err("no such run (it ran before the UI restarted)", 404)
+    return {"run": {k: v for k, v in rec.items() if k != "nodes"}}
 
 
 def work_active(h, q, b):
@@ -1833,8 +1970,8 @@ def work_log(h, q, b):
     r = W.read_log(wid, rid, nid, after)
     if r is None:
         raise Err("no log", 404)
-    run = (W.get_run(wid, rid) if wid != W.CHAT_RUNS else W.get_chat_run(rid)) or {}
-    rec = ((run.get("nodes") or {}).get(nid) or {}) if wid != W.CHAT_RUNS else ((run.get("nodes") or {}).get("node") or {})
+    run = (TRY.get(rid) if wid == W.TRY_RUNS else W.get_run(wid, rid) if wid != W.CHAT_RUNS else W.get_chat_run(rid)) or {}
+    rec = ((run.get("nodes") or {}).get(nid) or {}) if wid not in (W.CHAT_RUNS, W.TRY_RUNS) else ((run.get("nodes") or {}).get("node") or {})
     live = rid in W.CTL
     r.update(done=not live or rec.get("status") not in (None, "running"), status=rec.get("status") or run.get("status") or "", cmd=rec.get("cmd", ""), exit=rec.get("exit"),
              chat=rec.get("chat", ""), steps=rec.get("steps") or [], started=rec.get("started") or rec.get("t0"), ended=rec.get("ended"))
@@ -1897,66 +2034,21 @@ def work_run(h, q, b):
     w = store.get_work(need(b, "id"))
     if not w:
         raise Err("no such work", 404)
-    cat = W.catalogue()
-    trig = [n for n in w["nodes"] if cat.get(n["type"], {}).get("kind") == "trigger"]
-    node = next((n for n in trig if n["id"] == b.get("node")), None) or next((n for n in trig if n["type"] == "start.manual"), None) or (trig[0] if trig else None)
-    if not node:
-        raise Err("add a Start node first")
-    text = str(b.get("text") or "")
-    data = {}
-    if node["type"] == "start.manual":
-        vals = b.get("data") if isinstance(b.get("data"), dict) else {}
-        for f in store.parse_inputs((node.get("config") or {}).get("inputs")):
-            v = vals.get(f["name"], f["default"])
-            if f["type"] == "checkbox":
-                v = bool(v)
-            elif f["type"] == "number":
-                try:
-                    v = float(v) if str(v).strip() else ""
-                    v = int(v) if v != "" and v == int(v) else v
-                except ValueError:
-                    raise Err("%s must be a number" % f["label"])
-            else:
-                v = str(v if v is not None else "")[:20000]
-            if f["required"] and (v == "" or v is None):
-                raise Err("%s is required" % f["label"])
-            if f["type"] == "select" and v not in f["options"] and v != "":
-                raise Err("%s: pick one of the listed options" % f["label"])
-            data[f["name"]] = v
-        if not text and data:
-            text = "\n".join("%s: %s" % (k, v) for k, v in data.items())
-    node = dict(node, config=dict(node.get("config") or {}, filter=""))               # a manual run is never filtered out
+    try:
+        node, ev = W.manual_event(w, b.get("node"), b.get("text"), b.get("data"))
+    except ValueError as e:
+        raise Err(str(e))
     origin = str(b.get("origin") or "")
     extra = {"origin": origin, "card": str(b.get("card") or "")[:40]} if origin and store.get_session(origin) else None
-    return {"run": ENGINE.fire(w, node, {"text": text or "manual run", "data": data}, "chat" if extra else "manual", extra)}
+    return {"run": ENGINE.fire(w, node, ev, "chat" if extra else "manual", extra)}
 
 
 def _slug(t):
     return __import__("re").sub(r"[^a-z0-9]+", "-", (t or "work").lower()).strip("-")[:40] or "work"
 
 
-RISKS = {"io.read_file": "reads files on this computer", "io.request": "makes web requests", "code.python": "runs Python code written in the workflow on the installer's machine", "git.read": "reads git repositories with your Vault logins",
-         "start.webhook": "listens for local webhook calls", "start.teams": "listens for messages from outside (tunnel + secret)", "send.teams": "posts to Teams", "send.slack": "posts to Slack", "start.slack": "listens for Slack calls (tunnel + signing secret)", "start.telegram": "reads messages sent to your Telegram bot", "send.telegram": "posts to Telegram", "send.discord": "posts to Discord", "send.webhook": "sends data to an outside URL",
-         "send.smtp": "sends mail (or saves drafts) through a mail server"}
-
-
-def _risks(w):
-    out = []
-    for n in w.get("nodes", []):
-        t = n.get("type", "")
-        r = RISKS.get(t) or ("runs code from the node package " + t[4:].split("/")[0] if t.startswith("pkg:") else "")
-        if t == "ai.claude" and (n.get("config") or {}).get("mode") == "bypass":
-            r = "runs Claude with permission checks bypassed"
-        if t == "ai.claude" and not r:
-            r = "runs Claude Code (can use your skills, tools and MCP servers)"
-        if r and r not in out:
-            out.append(r)
-        k = n.get("credential_kind")
-        if k and not n.get("credential"):
-            r2 = "needs a '%s' credential set: you pick or create one after installing (no logins are shared)" % k
-            if r2 not in out:
-                out.append(r2)
-    return out
+RISKS = workpkg.RISKS
+_risks = workpkg.risks
 
 
 def _author_default():
@@ -1980,8 +2072,11 @@ def _readme(w, title, desc, pkgs, cmds, name):
                       for i, k in enumerate(order) if nodes[k]["type"] != "flow.note")
     ins = store.work_inputs(w)
     table = ("\n## Inputs\n\n| Name | Label | Type | Required |\n| --- | --- | --- | --- |\n" + "\n".join("| `%s` | %s | %s | %s |" % (i["name"], i["label"], i["type"], "yes" if i["required"] else "no") for i in ins) + "\n") if ins else ""
-    return ("# %s\n\n%s\n\n## What it does\n\n%s\n%s\n## Use it\n\nOpen **Works > Workflows > Import file** and choose this zip (or `nodra install` the zip, then add it from **Installed**). Fill in the secret fields (keys, webhook URLs: they are never shipped), then run it from any chat with `/work:%s`.\n%s%s"
-            % (title, desc or "A work for Nodra.", steps, table, _slug(title),
+    kinds = sorted({x["kind"] for x in workpkg.needs_credentials(w)})
+    creds = ("\nIt needs credential sets of kind %s (never shipped: each person uses their own). `nodra work cred template KIND` prints the JSON to fill in.\n" % ", ".join("`%s`" % k for k in kinds)) if kinds else ""
+    return ("# %s\n\n%s\n\n## What it does\n\n%s\n%s\n## Use it\n\nOpen **Works > Workflows > Import file** and choose this zip (or `nodra install` the zip, then add it from **Installed**). Fill in the secret fields (keys, webhook URLs: they are never shipped), then run it from any chat with `/work:%s`.\n\n"
+            "On a server, without the chat:\n\n```sh\nnodra install %s.zip\nnodra work pull %s\nnodra work setup %s          # credential sets, working folders, secrets (or --creds creds.json)\nnodra work run %s\nnodra work enable %s && nodra work serve --bg   # when it has a schedule or trigger\n```\n%s%s%s"
+            % (title, desc or "A work for Nodra.", steps, table, _slug(title), name, name, _slug(title), _slug(title), _slug(title), creds,
                ("\n## Needs\n\n" + "".join("- node package `%s`\n" % p for p in pkgs) + "".join("- command `%s` on PATH\n" % c for c in cmds)) if pkgs or cmds else "",
                "\n## Safety\n\nThis workflow " + "; ".join(_risks(w)) + ". Read it in Works before you switch it on.\n" if _risks(w) else ""))
 
@@ -1993,31 +2088,13 @@ def work_export_info(h, q, b):
     slug = _slug(w["title"])
     name = slug if slug.startswith("workflow") else "workflow-" + slug
     pkgs, cmds = _needs(w, W.catalogue())
+    shared = workpkg.strip_for_share(w)                                  # what the installer gets: credential links are kinds there
     return {"name": name, "version": "0.1.0", "description": w.get("description") or w["title"], "authors": [_author_default()], "tags": ["workflow"], "license": "MIT",
-            "os": [], "packages": pkgs, "commands": cmds, "risks": _risks(w), "readme": _readme(w, w["title"], w.get("description", ""), pkgs, cmds, name)}
+            "os": [], "packages": pkgs, "commands": cmds, "risks": _risks(shared), "readme": _readme(shared, w["title"], w.get("description", ""), pkgs, cmds, name)}
 
 
 def _strs(v, n=20, ln=80):
     return [str(x).strip()[:ln] for x in (v if isinstance(v, list) else []) if str(x).strip()][:n]
-
-
-def _clean_work(w):
-    """The work as it may leave this machine: no id, switched off, secret fields blanked, logins reduced to their kind, saved nodes written in."""
-    cat = W.catalogue()
-    out = json.loads(json.dumps(w))
-    out.pop("id", None)
-    out.update(enabled=False)
-    for n in out["nodes"]:
-        c = W.credential(n.pop("credential", None))
-        if c:                                                    # only the KIND travels: whoever imports it picks or creates their own set
-            n["credential_kind"], n["credential_name"] = c["kind"], c["name"]
-        p = W.preset(n.pop("preset", None))
-        if p and p["type"] == n["type"]:                         # saved nodes exist only here: the file gets their settings written in
-            n["config"] = dict({k: v for k, v in p["config"].items() if v != W.MARK}, **{k: v for k, v in n["config"].items() if v not in (None, "")})
-        for f in (cat.get(n["type"]) or {}).get("fields", []):
-            if f.get("secret"):
-                n["config"][f["name"]] = ""                      # never leaves the machine; the person who imports it types their own
-    return out
 
 
 def _pkg_meta(b, info, default_desc):
@@ -2059,7 +2136,7 @@ def work_export(h, q, b):
     w = store.get_work(need(b, "id"))
     if not w:
         raise Err("no such work", 404)
-    out = _clean_work(w)
+    out = workpkg.strip_for_share(w)                             # no secrets, no credential sets (kinds only), no machine folders
     slug = _slug(w["title"])
     if b.get("format") != "zip":
         out["description"] = out.get("description") or ""
@@ -2070,26 +2147,25 @@ def work_export(h, q, b):
     pkgs = [p for p in _strs(b.get("packages"), 30, 100) if re.match(r"^[A-Za-z0-9][A-Za-z0-9._<>=!,~ -]*$", p)]
     cmds = [c for c in _strs(b.get("commands"), 10, 40) if re.match(r"^[A-Za-z0-9._-]+$", c)]
     toml = _manifest(m, "workflow", "packages = %s\nos = %s\ncommands = [%s]\n" % (json.dumps(pkgs), json.dumps(m["oses"]), ", ".join("{name = %s}" % json.dumps(c) for c in cmds)))
-    data = _zip_bytes({"nodra.toml": toml, "README.md": m["readme"], "works/%s.work.json" % slug: json.dumps(out, indent=1, ensure_ascii=False)})
+    files = {"nodra.toml": toml, "README.md": m["readme"]}
+    tmp = tempfile.mkdtemp(prefix="nodra-work-")
+    try:                                                          # the files its prompts mention travel with it, in works/<slug>.files/
+        dest = os.path.join(tmp, slug + ".files")
+        workpkg.bundle(w, out, dest, notes=b.get("notes", True) is not False)
+        for cur, _, names in os.walk(dest):
+            for f in names:
+                full = os.path.join(cur, f)
+                with open(full, "rb") as fh:
+                    files["works/" + os.path.relpath(full, tmp).replace(os.sep, "/")] = fh.read()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    files["works/%s.work.json" % slug] = json.dumps(out, indent=1, ensure_ascii=False)
+    data = _zip_bytes(files)
     return h._download(m["name"] + "-" + m["version"] + ".zip", data, "application/zip")
 
 
 def _workflows():
-    out = []
-    for p in cli(lambda: A.run(["list"])).get("data") or []:
-        d = os.path.join(p.get("path") or "", "works")
-        if p.get("type") != "workflow" or not os.path.isdir(d):
-            continue
-        for f in sorted(os.listdir(d)):
-            if f.endswith(".work.json"):
-                try:
-                    with open(os.path.join(d, f), encoding="utf-8") as fh:
-                        w = json.load(fh)
-                    out.append({"package": p["name"], "version": p.get("version"), "file": f, "title": str(w.get("title") or f)[:80], "description": str(w.get("description") or p.get("description") or "")[:300],
-                                "nodes": len(w.get("nodes", [])), "risks": _risks(w), "_path": os.path.join(d, f)})
-                except (OSError, ValueError):
-                    pass
-    return out
+    return cli(workpkg.workflows)
 
 
 def work_workflows(h, q, b):
@@ -2116,32 +2192,12 @@ def work_samples(h, q, b):
     return {"samples": [{k: v for k, v in x.items() if k != "_path"} for x in _samples()]}
 
 
-def _bind_credentials(w):
-    """A shared workflow names credential kinds, never values: link a node to the set of that kind when exactly one fits (same name first)."""
-    have = W.credentials()
-    for n in w.get("nodes", []):
-        kind = n.get("credential_kind")
-        if kind and not n.get("credential"):
-            same = [c for c in have.values() if c["kind"] == kind]
-            pick = next((c for c in same if c["name"] == n.get("credential_name")), same[0] if len(same) == 1 else None)
-            if pick:
-                n["credential"] = pick["id"]
-    return w
+_bind_credentials = workpkg.bind_credentials
+_needs_credentials = workpkg.needs_credentials
 
 
-def _needs_credentials(w):
-    """[{kind, title, name, nodes}] of the credential sets this work still lacks (what an import should ask the person to pick or create)."""
-    ks, out = W.kinds(), {}
-    for n in w.get("nodes", []):
-        k = n.get("credential_kind")
-        if k and not n.get("credential"):
-            r = out.setdefault(k, {"kind": k, "title": (ks.get(k) or {}).get("title", k), "name": n.get("credential_name") or "", "nodes": []})
-            r["nodes"].append(n.get("label") or n.get("type"))
-    return list(out.values())
-
-
-def _add_work(w, pkg=""):
-    """Save a work document from a file as a new, switched-off work. -> the answer shape of works/import."""
+def _add_work(w, pkg="", files=None):
+    """Save a work document from a file as a new, switched-off work; FILES = [(relative path, bytes)] it brought along. -> the answer shape of works/import."""
     if not isinstance(w, dict) or not isinstance(w.get("nodes"), list):
         raise Err("this is not a work file")
     w = dict(w)
@@ -2153,7 +2209,17 @@ def _add_work(w, pkg=""):
     except (ValueError, KeyError, TypeError) as e:
         raise Err("this is not a valid work: %s" % e)
     w = store.save_work(w)
-    return {"work": w, "risks": _risks(w), "needs_credentials": _needs_credentials(w)}
+    nf = 0
+    if files:
+        dest = os.path.realpath(W.work_files_dir(w["id"], make=True))
+        for rel, data in files:
+            t = os.path.realpath(os.path.join(dest, rel))
+            if t.startswith(dest + os.sep):
+                os.makedirs(os.path.dirname(t), exist_ok=True)
+                with open(t, "wb") as fh:
+                    fh.write(data)
+                nf += 1
+    return {"work": w, "risks": _risks(w), "needs_credentials": _needs_credentials(w), "needs": workpkg.needs_setup(w), "files": nf}
 
 
 def work_import(h, q, b):
@@ -2161,9 +2227,10 @@ def work_import(h, q, b):
     hit = next((x for x in (_workflows() if pkg else _samples()) if x["package"] == pkg and x["file"] == fn), None)
     if not hit:
         raise Err("no such workflow", 404)
-    with open(hit["_path"], encoding="utf-8") as fh:
-        w = json.load(fh)
-    return _add_work(w, pkg)
+    try:
+        return workpkg.import_file(hit["_path"], pkg)
+    except ValueError as e:
+        raise Err(str(e))
 
 
 ZIP_MEMBER_MAX = 4 * 1024 * 1024
@@ -2192,20 +2259,21 @@ def work_import_file(h, q, b):
     Body: b64 (file) or text (pasted JSON). -> {work, risks, needs_credentials, works: [...]}"""
     raw = _upload_bytes(b, "work file")
     if raw[:4] == b"PK\x03\x04":
-        docs = []
-        for name, data in _zip_members(raw, lambda n: n.endswith(".work.json"))[:20]:
+        docs, members = [], _zip_members(raw, lambda n: n.endswith(".work.json") or ".files/" in n)
+        for name, data in [m for m in members if m[0].endswith(".work.json")][:20]:
+            pre = name[:-len(".work.json")] + ".files/"
             try:
-                docs.append(json.loads(data.decode("utf-8-sig")))
+                docs.append((json.loads(data.decode("utf-8-sig")), [(n[len(pre):], d) for n, d in members if n.startswith(pre)]))
             except ValueError:
                 raise Err("%s is not valid JSON" % name)
         if not docs:
             raise Err("no .work.json file in this zip")
     else:
         try:
-            docs = [json.loads(raw.decode("utf-8-sig"))]
+            docs = [(json.loads(raw.decode("utf-8-sig")), None)]
         except ValueError:
             raise Err("this is not a .work.json file")
-    res = [_add_work(d) for d in docs]
+    res = [_add_work(d, "", f) for d, f in docs]
     return dict(res[0], works=res)
 
 
@@ -2467,7 +2535,7 @@ ROUTES = {
     ("GET", "files"): files, ("GET", "files/content"): file_get, ("PUT", "files/content"): file_put, ("POST", "files/vscode"): open_vscode, ("GET", "files/diff"): file_diff, ("GET", "files/download"): files_download, ("GET", "sessions/search"): sessions_search, ("GET", "mcp/free"): mcp_free, ("POST", "mcp/settings"): mcp_settings, ("GET", "upgrade"): upgrade_status, ("POST", "upgrade/check"): upgrade_check, ("POST", "upgrade/apply"): upgrade_act, ("POST", "mcp/test"): mcp_test, ("GET", "free/models"): free_models, ("POST", "chat"): chat_send, ("POST", "chat/stop"): chat_stop, ("POST", "chat/hint"): chat_hint, ("POST", "chat/btw"): chat_btw, ("POST", "chat/card"): chat_card, ("POST", "chat/attach"): chat_attach, ("POST", "sessions/branch"): session_branch, ("GET", "sessions/export"): chat_export, ("POST", "sessions/import"): chat_import, ("POST", "sessions/rewind"): session_rewind,
     ("GET", "themes"): themes_list, ("POST", "themes/save"): theme_save, ("POST", "themes/delete"): theme_delete, ("GET", "usage"): usage_get, ("GET", "usage/sessions"): usage_sessions, ("GET", "usage/limits"): usage_limits, ("POST", "usage/limits/bridge"): usage_limits_bridge, ("POST", "claude/auth/check"): claude_auth_check, ("GET", "usage/session"): usage_session, ("GET", "prefs"): prefs_get, ("PUT", "prefs"): prefs_put, ("GET", "slash"): slash,
     ("GET", "works"): works, ("GET", "works/get"): work_get, ("POST", "works/save"): work_save, ("POST", "works/delete"): work_delete,
-    ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("GET", "works/presets"): presets_list, ("GET", "works/credentials"): credentials_list, ("POST", "works/credentials/save"): credentials_save, ("POST", "works/credentials/delete"): credentials_delete, ("POST", "works/presets/save"): presets_save, ("POST", "works/presets/delete"): presets_delete, ("POST", "nodes/run"): node_run, ("GET", "works/chatruns"): work_chat_runs, ("GET", "works/active"): work_active, ("GET", "works/files"): work_files, ("POST", "works/open"): work_open, ("POST", "works/rerun"): work_rerun, ("POST", "works/stop"): work_stop, ("GET", "works/log"): work_log, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import, ("POST", "works/import-file"): work_import_file,
+    ("POST", "works/enable"): work_enable, ("GET", "works/nodes"): work_nodes, ("GET", "works/presets"): presets_list, ("GET", "works/credentials"): credentials_list, ("POST", "works/credentials/save"): credentials_save, ("POST", "works/credentials/delete"): credentials_delete, ("POST", "works/presets/save"): presets_save, ("POST", "works/presets/delete"): presets_delete, ("POST", "nodes/run"): node_run, ("POST", "works/env/check"): env_check, ("POST", "works/env/install"): env_install, ("GET", "works/env/job"): env_job, ("POST", "works/env/cancel"): env_cancel, ("GET", "works/envs"): env_list, ("POST", "works/magic"): work_magic, ("POST", "works/try"): work_try, ("GET", "works/try/status"): work_try_status, ("GET", "works/chatruns"): work_chat_runs, ("GET", "works/active"): work_active, ("GET", "works/files"): work_files, ("POST", "works/open"): work_open, ("POST", "works/rerun"): work_rerun, ("POST", "works/stop"): work_stop, ("GET", "works/log"): work_log, ("POST", "works/generate"): work_generate, ("POST", "works/make"): work_make, ("POST", "works/generate/start"): work_generate_start, ("GET", "works/generate/status"): work_generate_status, ("POST", "works/run"): work_run, ("GET", "works/runs"): work_runs, ("POST", "works/export"): work_export, ("GET", "works/export-info"): work_export_info, ("GET", "works/samples"): work_samples, ("GET", "works/workflows"): work_workflows, ("POST", "works/import"): work_import, ("POST", "works/import-file"): work_import_file,
     ("GET", "works/run"): work_run_get, ("GET", "nodes/local"): nodes_local, ("GET", "nodes/starter"): nodes_starter, ("POST", "nodes/save"): nodes_save, ("POST", "nodes/delete"): nodes_delete,
     ("GET", "nodes/export-info"): nodes_export_info, ("POST", "nodes/export"): nodes_export, ("POST", "nodes/import"): nodes_import, ("GET", "nodes/packages"): nodes_packages, ("POST", "works/layout"): works_layout, ("GET", "works/mentions"): works_mentions, ("GET", "works/sources"): works_sources, ("GET", "works/hook"): work_hook,
     ("GET", "auth"): auth_status, ("POST", "auth/check"): auth_check, ("POST", "auth/login"): auth_login,
@@ -2477,6 +2545,9 @@ ROUTES = {
 
 def main():
     global BOX, ENGINE, TOKEN
+    if sys.argv[1:2] == ["--works"]:                              # `nodra work ...`: the Works engine without the page (nodraui/workscli.py)
+        from nodraui import workscli
+        sys.exit(workscli.main(sys.argv[2:]))
     folder = store.ui_dir()
     # the key survives restarts, cookie lasts 90 days (a restart used to lock every open tab out); delete ~/.nodra/ui/token to rotate it
     tokf, fresh = os.path.join(folder, "token"), False

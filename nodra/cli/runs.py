@@ -583,11 +583,18 @@ def venv_of(r):
     return installer.run_python(r["bot"], rec, rec.get("bot_home") or installer.bot_home(r["bot"], installer.runnable_kind(r["bot"], rec) or "bot"))
 
 
-def start_inplace(rid, bot, folder, fg=False):
-    """Run the [service] of the nodra.toml in `folder` where it is (the chat inside the checkout): no install, no copy. -> exit code."""
+def start_inplace(rid, bot, folder, fg=False, args=None, restart=None):
+    """Run the [service] of the nodra.toml in `folder` where it is (the chat inside the checkout): no install, no copy. -> exit code.
+    ARGS / RESTART: another role of the same folder under its own run id (`nodra work serve --bg` = `--works serve`, restart always)."""
     old = load(rid) or {}
     spec = M.runnable(installer.inplace_bot(bot, folder)[1])
-    r = dict(old) if old.get("inplace") == folder else new_spec(rid, rid, bot, [], spec.get("schedule", ""), spec.get("restart") or None, fg=fg, inplace=folder)
+    r = dict(old) if old.get("inplace") == folder else new_spec(rid, rid, bot, list(args or []), spec.get("schedule", ""), restart or spec.get("restart") or None, fg=fg, inplace=folder)
+    if args is not None:
+        if alive(r):
+            raise NodraError("%s is already running (pid %s). Use: nodra run restart %s | logs %s -f | stop %s" % (rid, r.get("pid") or r.get("sup_pid"), rid, rid, rid))
+        r["args"] = check_args(list(args))
+        if restart:
+            r["restart"] = restart
     r["mode"] = "fg" if fg else "bg"
     installer.bot_command(bot, r.get("args") or [], inplace=folder)       # missing settings or a bad manifest: say so here
     return launch(r, fg=fg)

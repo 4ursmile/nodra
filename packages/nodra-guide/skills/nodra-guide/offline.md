@@ -64,6 +64,9 @@ nodra upgrade [--check]             # git pull --ff-only in the root, restart th
 nodra upgrade --no-restart          # pull only; the chat auto-updates itself this way when idle (Settings > Nodra app)
 nodra statusline install|remove     # opt-in: subscription 5-hour/weekly limits from Claude Code sessions on the Usage page
 nodra chat [start|stop|restart|status|open]
+nodra work list | show W | pull PKG | import FILE | export W [-o DIR] | setup W [--creds FILE] [--env NAME] | set W NODE k=v ...
+nodra work run W [--input k=v] | runs W | logs W | enable W | disable W | serve [--bg] | cred ... | env check|install W | lib | rm W
+                                    # Works without the chat page (servers); same files as the chat; see docs/cli.md
 
 nodra run [BOT] [-- ARGS]           # start an installed bot/service in the background
 nodra run BOT --fg | --name N | --schedule 5m|'0 8 * * *' | --restart no|on-failure|always | --venv PATH | --python PATH
@@ -271,7 +274,7 @@ In the chat: Claude chats see every server registered with Claude Code. Free cha
 
 ## 10. Works nodes
 
-A **Work** is a graph in the chat's Works editor: a Start node produces an event, its text flows along edges through action nodes. Built-ins: `start.manual`, `start.cron`, `start.webhook`, `ai.claude`, `ai.free`, `flow.filter`, `flow.template`, `flow.output`, `flow.memory`, `flow.loop`/`flow.endloop`, `io.read_file`, `io.request`, `io.path`, `git.read`, `git.pull`, `send.smtp`, `code.python`. Templates: `{{input}}`, `{{trigger}}`, `{{data.key}}`, `{{in.1}}`, `{{run.dir}}`, `{{node.dir}}`. Every trigger has a `filter` regex tested before a run exists.
+A **Work** is a graph in the chat's Works editor: a Start node produces an event, its text flows along edges through action nodes. Built-ins: `start.manual`, `start.cron`, `start.webhook`, `ai.claude`, `ai.free`, `flow.filter`, `flow.template`, `flow.output`, `flow.memory`, `flow.loop`/`flow.endloop`, `io.read_file`, `io.request`, `io.path`, `git.read`, `git.pull`, `send.smtp`, `code.python` (`# %% name` lines = steps in one namespace), `db.sql` (SQLAlchemy: PostgreSQL, SQL Server, Oracle, Trino, MySQL, SQLite, DuckDB; native / pandas / polars; Write table), `db.trino` (stdlib HTTP, no driver), `etl.spark` (PySpark steps, session or spark-submit, s3a buckets from an `s3` set). Templates: `{{input}}`, `{{trigger}}`, `{{data.key}}`, `{{in.1}}`, `{{run.dir}}`, `{{node.dir}}`. Every trigger has a `filter` regex tested before a run exists.
 
 A node package (`type = "node"`) has `nodes/<id>.node.json` and the program it runs:
 
@@ -284,7 +287,7 @@ A node package (`type = "node"`) has `nodes/<id>.node.json` and the program it r
  "outputs": [{"name": "text", "type": "text"}, {"name": "length", "type": "text", "example": "6"}]}
 ```
 
-`kind` is `trigger` or `action`; the node type is `pkg:<package>/<id>`. `run` is a list (`{python}` = the chat's interpreter, or the package venv's when `[python]` is set; `{pkg}` = the package folder; cwd = the package folder). `fields[].type`: `text`, `textarea`, `number`, `checkbox`, `select` (+`options`), `password`, `model`, `effort`, `mode`; also `label`, `default`, `required`, `help`, `secret`, `assist`. `password`/`secret` fields are stored encrypted and arrive in the stdin document, never in argv or env. `templated` lists fields where `{{...}}` is expanded before the program starts; `takes` lists fields filled from `{{data.<name>}}` of earlier nodes when empty. `credential: {"kind": "teams", "map": {...}}` plus `nodes/<name>.cred.json` shares a credential set between nodes.
+`kind` is `trigger` or `action`; the node type is `pkg:<package>/<id>`. `run` is a list (`{python}` = the chat's interpreter, or the package venv's when `[python]` is set; `{pkg}` = the package folder; cwd = the package folder). `fields[].type`: `text`, `textarea`, `number`, `checkbox`, `select` (+`options`), `password`, `model`, `effort`, `mode`, `code` (+`lang`: colour editor with Expand / Run), `env` (the node's Python environment; `{python}` becomes it); also `label`, `default`, `required`, `help`, `secret`, `assist`. `password`/`secret` fields are stored encrypted and arrive in the stdin document, never in argv or env. `templated` lists fields where `{{...}}` is expanded before the program starts; `takes` lists fields filled from `{{data.<name>}}` of earlier nodes when empty. `credential: {"kind": "teams", "map": {...}}` plus `nodes/<name>.cred.json` shares a credential set between nodes (a field may be `"type": "list"` of entries, like the builtin `s3` buckets). `"vault": true` lets the program read the sets granted to its node with `import nodra_vault` (`vault.bucket("raw").uri("x.csv")`, `vault.credential("db")["password"]`); `import nodra_data` gives SQLAlchemy engines from a `sql` set. `"packages": ["pandas>=2"]` lists pip packages: the node's **Environment** box checks its Python and installs what is missing (managed envs in `~/.nodra/ui/envs/NAME`). **Magic ask** on every node: describe it, a model (API key, else `claude -p` without tools) proposes field values and code; nothing changes until Apply; it never sees secrets. Code fields expand full screen with **Run** / **Run selection** (unsaved settings, real run; results in `~/.nodra/ui/runs/try/`).
 
 **Action protocol.** The program reads ONE JSON document on stdin and prints ONE JSON line last on stdout:
 

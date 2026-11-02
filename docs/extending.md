@@ -71,6 +71,7 @@ Without one of them nothing changes: human output, `--plain` and `--name-only` k
 | `vault test [REMOTE]` | `[{host, url, username, login, reachable}]`. |
 | `run list`, `run status NAME` | The runs (`id`, `bot`, `args`, `schedule`, `restart`, `status`, `pid`, `runs`, `last_exit`, `state`, `alive`, ...). |
 | `chat status` | Whether the chat runs and its URL. |
+| `work list`, `work show W`, `work run W`, ... | The Works engine's own document (`work list`: `{works: [...], scheduler}`); `work serve --bg`: `{run, started}`. |
 | `lock` | `{file, lock}`: the lock file path and its content. |
 | `knowledge list` | The notes. `knowledge get NOTE` puts the body in `output`. |
 | `usage` | The usage report. |
